@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
                                      renderer.width * 3, renderer.height * 3, SDL_WINDOW_SHOWN);
     renderer.renderer = SDL_CreateRenderer(renderer.window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     
-    // 改为 ABGR8888 以匹配 mGBA 的内存布局
+    // Use ABGR8888 to match mGBA's memory layout
     renderer.texture = SDL_CreateTexture(renderer.renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 
                                        renderer.width, renderer.height);
 
