@@ -1,312 +1,118 @@
-/* Copyright (c) 2013-2015 Jeffrey Pfau
- *
- * This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-#include "main.h"
-
-#include <mgba/internal/debugger/cli-debugger.h>
-
-#ifdef ENABLE_SCRIPTING
-#include <mgba/core/scripting.h>
-
-#ifdef ENABLE_PYTHON
-#include "platform/python/engine.h"
-#endif
-#endif
-
 #include <mgba/core/core.h>
-#include <mgba/core/config.h>
-#include <mgba/core/input.h>
-#include <mgba/core/serialize.h>
-#include <mgba/core/thread.h>
+#include <mgba/gba/core.h>
 #include <mgba/internal/gba/input.h>
-
-#include <mgba/feature/commandline.h>
 #include <mgba-util/vfs.h>
-
 #include <SDL.h>
+#include <stdio.h>
+#include <fcntl.h>
+#include <stdlib.h>
 
-#include <errno.h>
-#include <signal.h>
+struct mSDLRenderer {
+    struct mCore* core;
+    SDL_Window* window;
+    SDL_Renderer* renderer;
+    SDL_Texture* texture;
+    uint32_t* pixels;
+    int width;
+    int height;
+};
 
-#define PORT "sdl"
+static void mSDLRun(struct mSDLRenderer* renderer) {
+    renderer->core->setAudioBufferSize(renderer->core, 2048);
 
-static void mSDLDeinit(struct mSDLRenderer* renderer);
+    bool running = true;
+    SDL_Event event;
 
-static int mSDLRun(struct mSDLRenderer* renderer, struct mArguments* args);
+    while (running) {
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                running = false;
+            }
+        }
 
-static struct mStandardLogger _logger;
+        const uint8_t* state = SDL_GetKeyboardState(NULL);
+        uint16_t keys = 0;
+        if (state[SDL_SCANCODE_X]) keys |= (1 << GBA_KEY_A);
+        if (state[SDL_SCANCODE_Z]) keys |= (1 << GBA_KEY_B);
+        if (state[SDL_SCANCODE_RETURN]) keys |= (1 << GBA_KEY_START);
+        if (state[SDL_SCANCODE_BACKSPACE]) keys |= (1 << GBA_KEY_SELECT);
+        if (state[SDL_SCANCODE_UP]) keys |= (1 << GBA_KEY_UP);
+        if (state[SDL_SCANCODE_DOWN]) keys |= (1 << GBA_KEY_DOWN);
+        if (state[SDL_SCANCODE_LEFT]) keys |= (1 << GBA_KEY_LEFT);
+        if (state[SDL_SCANCODE_RIGHT]) keys |= (1 << GBA_KEY_RIGHT);
+        if (state[SDL_SCANCODE_S]) keys |= (1 << GBA_KEY_R);
+        if (state[SDL_SCANCODE_A]) keys |= (1 << GBA_KEY_L);
+        
+        renderer->core->setKeys(renderer->core, keys);
+        renderer->core->runFrame(renderer->core);
 
-static struct VFile* _state = NULL;
-
-static void _loadState(struct mCoreThread* thread) {
-	mCoreLoadStateNamed(thread->core, _state, SAVESTATE_RTC);
+        // Update texture with ABGR8888 format
+        SDL_UpdateTexture(renderer->texture, NULL, renderer->pixels, renderer->width * sizeof(uint32_t));
+        SDL_RenderClear(renderer->renderer);
+        SDL_RenderCopy(renderer->renderer, renderer->texture, NULL, NULL);
+        SDL_RenderPresent(renderer->renderer);
+    }
 }
 
 int main(int argc, char** argv) {
-#ifdef _WIN32
-	AttachConsole(ATTACH_PARENT_PROCESS);
-	freopen("CONOUT$", "w", stdout);
-#endif
-	struct mSDLRenderer renderer = {0};
+    if (argc < 2) {
+        printf("Usage: %s <game.gba>\n", argv[0]);
+        return 1;
+    }
 
-	struct mCoreOptions opts = {
-		.useBios = true,
-		.rewindEnable = true,
-		.rewindBufferCapacity = 600,
-		.rewindBufferInterval = 1,
-		.audioBuffers = 1024,
-		.videoSync = false,
-		.audioSync = true,
-		.volume = 0x100,
-		.logLevel = mLOG_WARN | mLOG_ERROR | mLOG_FATAL,
-	};
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+        return 1;
+    }
 
-	struct mArguments args;
-	struct mGraphicsOpts graphicsOpts;
+    struct mSDLRenderer renderer = {0};
+    renderer.width = 240;
+    renderer.height = 160;
+    renderer.pixels = calloc(renderer.width * renderer.height, sizeof(uint32_t));
 
-	struct mSubParser subparser;
+    renderer.window = SDL_CreateWindow("mGBA Minimal", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 
+                                     renderer.width * 3, renderer.height * 3, SDL_WINDOW_SHOWN);
+    renderer.renderer = SDL_CreateRenderer(renderer.window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    
+    // 改为 ABGR8888 以匹配 mGBA 的内存布局
+    renderer.texture = SDL_CreateTexture(renderer.renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 
+                                       renderer.width, renderer.height);
 
-	mSubParserGraphicsInit(&subparser, &graphicsOpts);
-	bool parsed = mArgumentsParse(&args, argc, argv, &subparser, 1);
-	if (!args.fname && !args.showVersion) {
-		parsed = false;
-	}
-	if (!parsed || args.showHelp) {
-		usage(argv[0], NULL, NULL, &subparser, 1);
-		mArgumentsDeinit(&args);
-		return !parsed;
-	}
-	if (args.showVersion) {
-		version(argv[0]);
-		mArgumentsDeinit(&args);
-		return 0;
-	}
+    renderer.core = GBACoreCreate();
+    if (!renderer.core) {
+        printf("Failed to create GBA core.\n");
+        return 1;
+    }
 
-	if (!SDL_OK(SDL_Init(SDL_INIT_VIDEO))) {
-		printf("Could not initialize video: %s\n", SDL_GetError());
-		mArgumentsDeinit(&args);
-		return 1;
-	}
+    if (!renderer.core->init(renderer.core)) {
+        printf("Failed to initialize GBA core.\n");
+        return 1;
+    }
 
-	renderer.core = mCoreFind(args.fname);
-	if (!renderer.core) {
-		printf("Could not run game. Are you sure the file exists and is a compatible game?\n");
-		mArgumentsDeinit(&args);
-		return 1;
-	}
+    mCoreInitConfig(renderer.core, "sdl");
+    renderer.core->setVideoBuffer(renderer.core, (mColor*)renderer.pixels, renderer.width);
 
-	if (!renderer.core->init(renderer.core)) {
-		mArgumentsDeinit(&args);
-		return 1;
-	}
+    struct VFile* rom = VFileOpenFD(argv[1], O_RDONLY);
+    if (!rom) {
+        printf("Could not open ROM: %s\n", argv[1]);
+        renderer.core->deinit(renderer.core);
+        return 1;
+    }
 
-	renderer.core->baseVideoSize(renderer.core, &renderer.width, &renderer.height);
-	renderer.ratio = graphicsOpts.multiplier;
-	if (renderer.ratio == 0) {
-		renderer.ratio = 1;
-	}
-	opts.width = renderer.width * renderer.ratio;
-	opts.height = renderer.height * renderer.ratio;
+    if (!renderer.core->loadROM(renderer.core, rom)) {
+        printf("Failed to load ROM.\n");
+        renderer.core->deinit(renderer.core);
+        return 1;
+    }
 
-	mInputMapInit(&renderer.core->inputMap, &GBAInputInfo);
-	mCoreInitConfig(renderer.core, PORT);
-	mArgumentsApply(&args, &subparser, 1, &renderer.core->config);
+    renderer.core->reset(renderer.core);
+    mSDLRun(&renderer);
 
-	mCoreConfigSetDefaultIntValue(&renderer.core->config, "logToStdout", true);
-	mCoreConfigLoadDefaults(&renderer.core->config, &opts);
-	mCoreLoadConfig(renderer.core);
-	mStandardLoggerInit(&_logger);
-	mStandardLoggerConfig(&_logger, &renderer.core->config);
-	mLogSetDefaultLogger(&_logger.d);
+    renderer.core->deinit(renderer.core);
+    SDL_DestroyTexture(renderer.texture);
+    SDL_DestroyRenderer(renderer.renderer);
+    SDL_DestroyWindow(renderer.window);
+    free(renderer.pixels);
+    SDL_Quit();
 
-	renderer.viewportWidth = renderer.core->opts.width;
-	renderer.viewportHeight = renderer.core->opts.height;
-	renderer.player.fullscreen = renderer.core->opts.fullscreen;
-	renderer.player.windowUpdated = 0;
-
-	renderer.lockAspectRatio = renderer.core->opts.lockAspectRatio;
-	renderer.lockIntegerScaling = renderer.core->opts.lockIntegerScaling;
-	renderer.interframeBlending = renderer.core->opts.interframeBlending;
-	renderer.filter = renderer.core->opts.resampleVideo;
-
-#ifdef BUILD_GL
-	if (mSDLGLCommonInit(&renderer)) {
-		mSDLGLCreate(&renderer);
-	} else
-#elif defined(BUILD_GLES2) || defined(USE_EPOXY)
-	if (mSDLGLCommonInit(&renderer))
-	{
-		mSDLGLES2Create(&renderer);
-	} else
-#endif
-	{
-		mSDLSWCreate(&renderer);
-	}
-
-	if (!renderer.init(&renderer)) {
-		mArgumentsDeinit(&args);
-		mCoreConfigDeinit(&renderer.core->config);
-		renderer.core->deinit(renderer.core);
-		return 1;
-	}
-
-	renderer.player.bindings = &renderer.core->inputMap;
-	mSDLInitBindingsGBA(&renderer.core->inputMap);
-	mSDLInitEvents(&renderer.events);
-	mSDLEventsLoadConfig(&renderer.events, mCoreConfigGetInput(&renderer.core->config));
-	mSDLAttachPlayer(&renderer.events, &renderer.player);
-	mSDLPlayerLoadConfig(&renderer.player, mCoreConfigGetInput(&renderer.core->config));
-
-#if SDL_VERSION_ATLEAST(2, 0, 0)
-	renderer.core->setPeripheral(renderer.core, mPERIPH_RUMBLE, &renderer.player.rumble.d.d);
-#endif
-
-	int ret;
-
-	// TODO: Use opts and config
-	ret = mSDLRun(&renderer, &args);
-	mSDLDetachPlayer(&renderer.events, &renderer.player);
-	mInputMapDeinit(&renderer.core->inputMap);
-
-	mSDLDeinit(&renderer);
-	mStandardLoggerDeinit(&_logger);
-
-	mArgumentsDeinit(&args);
-	mCoreConfigFreeOpts(&opts);
-	mCoreConfigDeinit(&renderer.core->config);
-	renderer.core->deinit(renderer.core);
-
-	return ret;
-}
-
-#if defined(_WIN32) && !defined(_UNICODE)
-#include <mgba-util/string.h>
-
-int wmain(int argc, wchar_t** argv) {
-	char** argv8 = malloc(sizeof(char*) * argc);
-	int i;
-	for (i = 0; i < argc; ++i) {
-		argv8[i] = utf16to8((uint16_t*) argv[i], wcslen(argv[i]) * 2);
-	}
-	__argv = argv8;
-	int ret = main(argc, argv8);
-	for (i = 0; i < argc; ++i) {
-		free(argv8[i]);
-	}
-	free(argv8);
-	return ret;
-}
-#endif
-
-int mSDLRun(struct mSDLRenderer* renderer, struct mArguments* args) {
-	struct mCoreThread thread = {
-		.core = renderer->core
-	};
-	if (!mCoreLoadFile(renderer->core, args->fname)) {
-		return 1;
-	}
-	mCoreAutoloadSave(renderer->core);
-	mArgumentsApplyFileLoads(args, renderer->core);
-#ifdef ENABLE_SCRIPTING
-	struct mScriptBridge* bridge = mScriptBridgeCreate();
-#ifdef ENABLE_PYTHON
-	mPythonSetup(bridge);
-#endif
-#ifdef ENABLE_DEBUGGERS
-	CLIDebuggerScriptEngineInstall(bridge);
-#endif
-#endif
-
-#ifdef ENABLE_DEBUGGERS
-	struct mDebugger debugger;
-	mDebuggerInit(&debugger);
-	bool hasDebugger = mArgumentsApplyDebugger(args, renderer->core, &debugger);
-
-	if (hasDebugger) {
-		mDebuggerAttach(&debugger, renderer->core);
-		mDebuggerEnter(&debugger, DEBUGGER_ENTER_MANUAL, NULL);
-#ifdef ENABLE_SCRIPTING
-		mScriptBridgeSetDebugger(bridge, &debugger);
-#endif
-	} else {
-		mDebuggerDeinit(&debugger);
-	}
-#endif
-
-	renderer->audio.samples = renderer->core->opts.audioBuffers;
-	renderer->audio.sampleRate = 44100;
-	thread.logger.logger = &_logger.d;
-
-	bool didFail = !mCoreThreadStart(&thread);
-
-	if (!didFail) {
-#if SDL_VERSION_ATLEAST(2, 0, 0)
-		renderer->core->currentVideoSize(renderer->core, &renderer->width, &renderer->height);
-		unsigned width = renderer->width * renderer->ratio;
-		unsigned height = renderer->height * renderer->ratio;
-		if (width != (unsigned) renderer->viewportWidth && height != (unsigned) renderer->viewportHeight) {
-			SDL_SetWindowSize(renderer->window, width, height);
-			renderer->player.windowUpdated = 1;
-		}
-		mSDLSetScreensaverSuspendable(&renderer->events, renderer->core->opts.suspendScreensaver);
-		mSDLSuspendScreensaver(&renderer->events);
-#endif
-		if (mSDLInitAudio(&renderer->audio, &thread)) {
-			if (args->savestate) {
-				struct VFile* state = VFileOpen(args->savestate, O_RDONLY);
-				if (state) {
-					_state = state;
-					mCoreThreadRunFunction(&thread, _loadState);
-					_state = NULL;
-					state->close(state);
-				}
-			}
-			renderer->runloop(renderer, &thread);
-			mSDLPauseAudio(&renderer->audio);
-			if (mCoreThreadHasCrashed(&thread)) {
-				didFail = true;
-				printf("The game crashed!\n");
-				mCoreThreadEnd(&thread);
-			}
-		} else {
-			didFail = true;
-			printf("Could not initialize audio.\n");
-		}
-#if SDL_VERSION_ATLEAST(2, 0, 0)
-		mSDLResumeScreensaver(&renderer->events);
-		mSDLSetScreensaverSuspendable(&renderer->events, false);
-#endif
-
-		mCoreThreadJoin(&thread);
-	} else {
-		printf("Could not run game. Are you sure the file exists and is a compatible game?\n");
-	}
-	renderer->core->unloadROM(renderer->core);
-
-#ifdef ENABLE_SCRIPTING
-	mScriptBridgeDestroy(bridge);
-#endif
-
-#ifdef ENABLE_DEBUGGERS
-	if (hasDebugger) {
-		renderer->core->detachDebugger(renderer->core);
-		mDebuggerDeinit(&debugger);
-	}
-#endif
-
-	return didFail;
-}
-
-static void mSDLDeinit(struct mSDLRenderer* renderer) {
-	mSDLDeinitEvents(&renderer->events);
-	mSDLDeinitAudio(&renderer->audio);
-#if SDL_VERSION_ATLEAST(2, 0, 0)
-	SDL_DestroyWindow(renderer->window);
-#endif
-
-	renderer->deinit(renderer);
-
-	SDL_Quit();
+    return 0;
 }
