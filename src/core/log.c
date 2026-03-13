@@ -182,7 +182,11 @@ void mLogFilterSave(const struct mLogFilter* filter, struct mCoreConfig* config)
 	int i;
 	for (i = 0; i < _category; ++i) {
 		char configName[128] = {0};
-		snprintf(configName, sizeof(configName) - 1, "logLevel.%s", mLogCategoryId(i));
+		const char* category = mLogCategoryId(i);
+		if (!category) {
+			continue;
+		}
+		snprintf(configName, sizeof(configName) - 1, "logLevel.%s", category);
 		int levels = mLogFilterLevels(filter, i);
 		if (levels) {
 			mCoreConfigSetIntValue(config, configName, levels & ~0x80);
