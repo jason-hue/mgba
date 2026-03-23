@@ -2,6 +2,9 @@ NAME = mgba
 
 ROM_GEN_DIR = roms/gen
 AM_PLATFORM_DIR = src/platform/am
+ROM_GEN_HDR = $(ROM_GEN_DIR)/roms.h
+ROM_GEN_SRC = $(ROM_GEN_DIR)/roms.c
+ROM_FILES = $(wildcard roms/*.gba)
 
 INC_PATH += include
 INC_PATH += src
@@ -22,7 +25,6 @@ CFLAGS += -DHAVE_LOCALTIME_R
 LDFLAGS_CXX += -lm
 
 AM_PLATFORM_SRC = $(wildcard $(AM_PLATFORM_DIR)/*.c)
-ROM_GEN_SRC = $(wildcard $(ROM_GEN_DIR)/*.c)
 
 CORE_SRC = \
 	src/core/bitmap-cache.c \
@@ -122,5 +124,10 @@ SRCS = \
 	$(UTIL_SRC) \
 	$(THIRD_PARTY_SRC) \
 	$(ROM_GEN_SRC)
+
+$(ROM_GEN_SRC) $(ROM_GEN_HDR): roms/build-roms.py $(ROM_FILES)
+	@python3 roms/build-roms.py
+
+$(AM_PLATFORM_SRC): $(ROM_GEN_HDR)
 
 include $(AM_HOME)/Makefile
