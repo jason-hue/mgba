@@ -24,6 +24,12 @@ CFLAGS += -DHAVE_LOCALTIME_R
 
 LDFLAGS_CXX += -lm
 
+ifeq ($(ARCH),native)
+CFLAGS += -DENABLE_VFS
+CFLAGS += -DENABLE_VFS_FILE
+NATIVE_VFS_SRC = src/util/vfs/vfs-file.c
+endif
+
 AM_PLATFORM_SRC = $(wildcard $(AM_PLATFORM_DIR)/*.c)
 
 CORE_SRC = \
@@ -122,6 +128,7 @@ SRCS = \
 	$(ARM_SRC) \
 	$(GBA_SRC) \
 	$(UTIL_SRC) \
+	$(NATIVE_VFS_SRC) \
 	$(THIRD_PARTY_SRC) \
 	$(ROM_GEN_SRC)
 

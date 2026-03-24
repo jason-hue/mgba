@@ -21,7 +21,7 @@
 #ifdef ENABLE_VFS
 struct VFile* VFileOpen(const char* path, int flags) {
 #ifdef ENABLE_VFS_FILE
-	const char* chflags;
+	const char* chflags = "rb";
 	switch (flags & O_ACCMODE) {
 	case O_WRONLY:
 		if (flags & O_APPEND) {

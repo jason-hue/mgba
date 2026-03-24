@@ -1,6 +1,7 @@
 #include <am.h>
 #include <klib.h>
 
+#include <mgba/core/log.h>
 #include <mgba/core/core.h>
 #include <mgba/gba/core.h>
 #include <mgba/internal/gba/input.h>
@@ -12,12 +13,35 @@
 #define FB_H 160
 
 static struct mCore* core;
+static struct mStandardLogger logger;
 static mColor framebuffer[FB_W * FB_H];
 static bool pressed[256];
 static int draw_x;
 static int draw_y;
 static bool running;
-static bool framebuffer_reported;
+static uint64_t frame_time_us;
+static uint64_t next_frame_deadline_us;
+
+static void am_poll_input(void);
+
+static uint64_t am_uptime_us(void) {
+	AM_TIMER_UPTIME_T uptime;
+
+	ioe_read(AM_TIMER_UPTIME, &uptime);
+	return uptime.us;
+}
+
+static void am_handle_key_event(const AM_INPUT_KEYBRD_T* ev) {
+	if (ev->keycode == AM_KEY_NONE) {
+		return;
+	}
+
+	assert(ev->keycode >= 0 && ev->keycode < (int)(sizeof(pressed) / sizeof(pressed[0])));
+	pressed[ev->keycode] = ev->keydown;
+	if (ev->keydown && (ev->keycode == AM_KEY_ESCAPE || ev->keycode == AM_KEY_Q)) {
+		running = false;
+	}
+}
 
 static void am_init_video(void) {
 	AM_GPU_CONFIG_T cfg;
@@ -41,16 +65,35 @@ static void am_flush_video(void) {
 	ioe_write(AM_GPU_FBDRAW, &draw);
 }
 
-static bool am_framebuffer_active(void) {
-	size_t i;
+static void am_init_timing(void) {
+	uint64_t frame_cycles = core->frameCycles(core);
+	uint64_t frequency = core->frequency(core);
 
-	for (i = 0; i < sizeof(framebuffer) / sizeof(framebuffer[0]); ++i) {
-		if (framebuffer[i] != 0) {
-			return true;
-		}
+	if (!frame_cycles || !frequency) {
+		frame_time_us = 16667;
+	} else {
+		frame_time_us = (frame_cycles * 1000000ULL + frequency - 1) / frequency;
+	}
+	next_frame_deadline_us = am_uptime_us();
+}
+
+static void am_throttle_frame(void) {
+	uint64_t now;
+
+	if (!frame_time_us) {
+		return;
 	}
 
-	return false;
+	next_frame_deadline_us += frame_time_us;
+	now = am_uptime_us();
+	if (now > next_frame_deadline_us + frame_time_us) {
+		next_frame_deadline_us = now;
+		return;
+	}
+
+	while (running && (now = am_uptime_us()) < next_frame_deadline_us) {
+		am_poll_input();
+	}
 }
 
 static void am_poll_input(void) {
@@ -61,11 +104,7 @@ static void am_poll_input(void) {
 		if (ev.keycode == AM_KEY_NONE) {
 			break;
 		}
-		assert(ev.keycode >= 0 && ev.keycode < (int)(sizeof(pressed) / sizeof(pressed[0])));
-		pressed[ev.keycode] = ev.keydown;
-		if (ev.keydown && (ev.keycode == AM_KEY_ESCAPE || ev.keycode == AM_KEY_Q)) {
-			running = false;
-		}
+		am_handle_key_event(&ev);
 	} while (1);
 }
 
@@ -106,8 +145,7 @@ static const struct embedded_rom* am_select_rom(const char* args) {
 	return &roms[0];
 }
 
-static bool am_load_rom(const char* args) {
-	const struct embedded_rom* rom = am_select_rom(args);
+static bool am_load_rom(const struct embedded_rom* rom) {
 	struct VFile* vf;
 
 	if (!rom) {
@@ -130,25 +168,64 @@ static bool am_load_rom(const char* args) {
 	return true;
 }
 
+static bool am_load_save(const struct embedded_rom* rom) {
+#if defined(ENABLE_VFS) && defined(ENABLE_VFS_FILE)
+	char save_path[PATH_MAX];
+
+	if (!rom) {
+		return false;
+	}
+
+	snprintf(save_path, sizeof(save_path), "%s.sav", rom->name);
+	if (!mCoreLoadSaveFile(core, save_path, false)) {
+		printf("Failed to load save: %s\n", save_path);
+		return false;
+	}
+	return true;
+#else
+	UNUSED(rom);
+	return true;
+#endif
+}
+
 int main(const char* args) {
+	const struct embedded_rom* rom;
+
 	ioe_init();
 	am_init_video();
 	running = true;
-	framebuffer_reported = false;
-
 	core = GBACoreCreate();
 	assert(core);
 	assert(core->init(core));
 	mCoreInitConfig(core, "am");
+	mStandardLoggerInit(&logger);
+	mCoreConfigSetIntValue(&core->config, "logToStdout", 1);
+	mCoreConfigSetIntValue(&core->config, "logToFile", 0);
+	mCoreConfigSetIntValue(&core->config, "logLevel", mLOG_FATAL | mLOG_ERROR | mLOG_WARN | mLOG_GAME_ERROR);
+	mCoreConfigSetIntValue(&core->config, "logLevel.gba.dma", 0);
+	mCoreConfigSetIntValue(&core->config, "logLevel.gba.bios", 0);
+	mCoreConfigSetIntValue(&core->config, "logLevel.gba.io", 0);
+	mCoreConfigSetIntValue(&core->config, "logLevel.gba.memory", 0);
+	mCoreConfigSetIntValue(&core->config, "logLevel.gba.sio", 0);
+	mCoreConfigSetIntValue(&core->config, "logLevel.gba.hardware", 0);
+	mStandardLoggerConfig(&logger, &core->config);
+	mLogSetDefaultLogger(&logger.d);
 	core->setAudioBufferSize(core, 2048);
 	core->setVideoBuffer(core, framebuffer, FB_W);
+	rom = am_select_rom(args);
 
-	if (!am_load_rom(args)) {
+	if (!am_load_rom(rom)) {
+		core->deinit(core);
+		return 1;
+	}
+
+	if (!am_load_save(rom)) {
 		core->deinit(core);
 		return 1;
 	}
 
 	core->reset(core);
+	am_init_timing();
 
 	while (running) {
 		uint32_t keys;
@@ -156,13 +233,12 @@ int main(const char* args) {
 		keys = am_build_gba_keys();
 		core->setKeys(core, keys);
 		core->runFrame(core);
-		if (!framebuffer_reported && am_framebuffer_active()) {
-			printf("Framebuffer received non-zero pixels.\n");
-			framebuffer_reported = true;
-		}
 		am_flush_video();
+		am_throttle_frame();
 	}
 
+	mLogSetDefaultLogger(NULL);
+	mStandardLoggerDeinit(&logger);
 	core->deinit(core);
 	return 0;
 }
