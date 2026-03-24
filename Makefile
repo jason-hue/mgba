@@ -132,7 +132,7 @@ SRCS = \
 	$(THIRD_PARTY_SRC) \
 	$(ROM_GEN_SRC)
 
-$(ROM_GEN_SRC) $(ROM_GEN_HDR): roms/build-roms.py $(ROM_FILES)
+$(ROM_GEN_SRC) $(ROM_GEN_HDR): roms/build-roms.py roms $(ROM_FILES)
 	@python3 roms/build-roms.py
 
 $(AM_PLATFORM_SRC): $(ROM_GEN_HDR)
