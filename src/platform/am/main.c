@@ -125,6 +125,20 @@ static uint32_t am_build_gba_keys(void) {
 	return keys;
 }
 
+static void am_print_available_roms(void) {
+	int i;
+
+	printf("Available ROMs:\n");
+	if (nroms <= 0) {
+		printf("  (none)\n");
+		return;
+	}
+
+	for (i = 0; i < nroms; ++i) {
+		printf("  %s\n", roms[i].name);
+	}
+}
+
 static const struct embedded_rom* am_select_rom(const char* args) {
 	int i;
 
@@ -142,7 +156,7 @@ static const struct embedded_rom* am_select_rom(const char* args) {
 		}
 	}
 
-	return &roms[0];
+	return NULL;
 }
 
 static bool am_load_rom(const struct embedded_rom* rom) {
@@ -190,6 +204,7 @@ static bool am_load_save(const struct embedded_rom* rom) {
 
 int main(const char* args) {
 	const struct embedded_rom* rom;
+	bool has_rom_arg = args && *args;
 
 	ioe_init();
 	am_init_video();
@@ -213,6 +228,14 @@ int main(const char* args) {
 	core->setAudioBufferSize(core, 2048);
 	core->setVideoBuffer(core, framebuffer, FB_W);
 	rom = am_select_rom(args);
+	if (has_rom_arg && !rom) {
+		printf("Unknown ROM: %s\n", args);
+		am_print_available_roms();
+		mLogSetDefaultLogger(NULL);
+		mStandardLoggerDeinit(&logger);
+		core->deinit(core);
+		return 1;
+	}
 
 	if (!am_load_rom(rom)) {
 		core->deinit(core);
