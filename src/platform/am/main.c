@@ -21,6 +21,9 @@ static int draw_y;
 static bool running;
 static uint64_t frame_time_us;
 static uint64_t next_frame_deadline_us;
+static uint64_t fps_window_start_us;
+static uint32_t fps_window_frames;
+static bool fps_line_active;
 
 static void am_poll_input(void);
 
@@ -94,6 +97,27 @@ static void am_throttle_frame(void) {
 	while (running && (now = am_uptime_us()) < next_frame_deadline_us) {
 		am_poll_input();
 	}
+}
+
+static void am_report_fps(void) {
+	uint64_t now = am_uptime_us();
+	uint64_t elapsed_us;
+
+	if (!fps_window_start_us) {
+		fps_window_start_us = now;
+	}
+
+	++fps_window_frames;
+	elapsed_us = now - fps_window_start_us;
+	if (elapsed_us < 1000000ULL) {
+		return;
+	}
+
+	printf("\rFPS: %u   ", (unsigned) ((fps_window_frames * 1000000ULL + elapsed_us / 2) / elapsed_us));
+	fflush(stdout);
+	fps_line_active = true;
+	fps_window_start_us = now;
+	fps_window_frames = 0;
 }
 
 static void am_poll_input(void) {
@@ -173,7 +197,6 @@ static bool am_load_rom(const struct embedded_rom* rom) {
 		printf("Failed to create ROM VFile.\n");
 		return false;
 	}
-
 	if (!core->loadROM(core, vf)) {
 		printf("Failed to load ROM: %s\n", rom->name);
 		return false;
@@ -209,6 +232,9 @@ int main(const char* args) {
 	ioe_init();
 	am_init_video();
 	running = true;
+	fps_window_start_us = 0;
+	fps_window_frames = 0;
+	fps_line_active = false;
 	core = GBACoreCreate();
 	assert(core);
 	assert(core->init(core));
@@ -246,7 +272,6 @@ int main(const char* args) {
 		core->deinit(core);
 		return 1;
 	}
-
 	core->reset(core);
 	am_init_timing();
 
@@ -257,11 +282,15 @@ int main(const char* args) {
 		core->setKeys(core, keys);
 		core->runFrame(core);
 		am_flush_video();
+		am_report_fps();
 		am_throttle_frame();
 	}
 
 	mLogSetDefaultLogger(NULL);
 	mStandardLoggerDeinit(&logger);
 	core->deinit(core);
+	if (fps_line_active) {
+		printf("\n");
+	}
 	return 0;
 }

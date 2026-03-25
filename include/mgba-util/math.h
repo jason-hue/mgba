@@ -19,7 +19,7 @@ static inline uint32_t popcount32(unsigned bits) {
 #endif
 
 static inline unsigned clz32(uint32_t bits) {
-#if defined(__GNUC__) || __clang__
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__ARCH_X86_NEMU)
 	if (!bits) {
 		return 32;
 	}
@@ -56,7 +56,7 @@ static inline unsigned clz32(uint32_t bits) {
 }
 
 static inline unsigned ctz32(uint32_t bits) {
-#if defined(__GNUC__) || __clang__
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__ARCH_X86_NEMU)
 	if (!bits) {
 		return 32;
 	}
