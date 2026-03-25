@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 
-#ifdef __ARCH_X86_NEMU
+#if !defined(__ISA_NATIVE__)
 
 extern Area heap;
 
