@@ -5,20 +5,26 @@
 #include <mgba/core/core.h>
 #include <mgba/gba/core.h>
 #include <mgba/internal/gba/input.h>
+#include <mgba-util/audio-buffer.h>
 #include <mgba-util/vfs.h>
 
 #include "roms.h"
 
 #define FB_W 240
 #define FB_H 160
+#define AUDIO_CHANNELS 2
+#define AUDIO_SAMPLES 1024
+#define AUDIO_CHUNK_FRAMES 1024
 
 static struct mCore* core;
 static struct mStandardLogger logger;
 static mColor framebuffer[FB_W * FB_H];
+static int16_t audio_chunk[AUDIO_CHUNK_FRAMES * AUDIO_CHANNELS];
 static bool pressed[256];
 static int draw_x;
 static int draw_y;
 static bool running;
+static bool audio_enabled;
 static uint64_t frame_time_us;
 static uint64_t next_frame_deadline_us;
 static uint64_t fps_window_start_us;
@@ -118,6 +124,58 @@ static void am_report_fps(void) {
 	fps_line_active = true;
 	fps_window_start_us = now;
 	fps_window_frames = 0;
+}
+
+static void am_init_audio(void) {
+	AM_AUDIO_CONFIG_T cfg;
+	AM_AUDIO_CTRL_T ctrl;
+	unsigned sample_rate;
+
+	ioe_read(AM_AUDIO_CONFIG, &cfg);
+	if (!cfg.present) {
+		audio_enabled = false;
+		return;
+	}
+
+	sample_rate = core->audioSampleRate(core);
+	if (!sample_rate) {
+		audio_enabled = false;
+		return;
+	}
+
+	ctrl.freq = sample_rate;
+	ctrl.channels = AUDIO_CHANNELS;
+	ctrl.samples = AUDIO_SAMPLES;
+	ioe_write(AM_AUDIO_CTRL, &ctrl);
+	audio_enabled = true;
+}
+
+static void am_flush_audio(void) {
+	struct mAudioBuffer* buffer;
+
+	if (!audio_enabled) {
+		return;
+	}
+
+	buffer = core->getAudioBuffer(core);
+	if (!buffer) {
+		return;
+	}
+
+	while (mAudioBufferAvailable(buffer) > 0) {
+		size_t frames = mAudioBufferAvailable(buffer);
+		AM_AUDIO_PLAY_T play;
+		if (frames > AUDIO_CHUNK_FRAMES) {
+			frames = AUDIO_CHUNK_FRAMES;
+		}
+		frames = mAudioBufferRead(buffer, audio_chunk, frames);
+		if (!frames) {
+			break;
+		}
+		play.buf.start = audio_chunk;
+		play.buf.end = (uint8_t*) audio_chunk + frames * AUDIO_CHANNELS * sizeof(audio_chunk[0]);
+		ioe_write(AM_AUDIO_PLAY, &play);
+	}
 }
 
 static void am_poll_input(void) {
@@ -272,6 +330,7 @@ int main(const char* args) {
 		core->deinit(core);
 		return 1;
 	}
+	am_init_audio();
 	core->reset(core);
 	am_init_timing();
 
@@ -281,6 +340,7 @@ int main(const char* args) {
 		keys = am_build_gba_keys();
 		core->setKeys(core, keys);
 		core->runFrame(core);
+		am_flush_audio();
 		am_flush_video();
 		am_report_fps();
 		am_throttle_frame();
