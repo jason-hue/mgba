@@ -19,12 +19,14 @@
 static struct mCore* core;
 static struct mStandardLogger logger;
 static mColor framebuffer[FB_W * FB_H];
+static uint32_t am_framebuffer[FB_W * FB_H];
 static int16_t audio_chunk[AUDIO_CHUNK_FRAMES * AUDIO_CHANNELS];
 static bool pressed[256];
 static int draw_x;
 static int draw_y;
 static bool running;
 static bool audio_enabled;
+static int audio_bufsize;
 static uint64_t frame_time_us;
 static uint64_t next_frame_deadline_us;
 static uint64_t fps_window_start_us;
@@ -32,6 +34,11 @@ static uint32_t fps_window_frames;
 static bool fps_line_active;
 
 static void am_poll_input(void);
+
+static void am_deinit_audio(void) {
+	audio_enabled = false;
+	audio_bufsize = 0;
+}
 
 static uint64_t am_uptime_us(void) {
 	AM_TIMER_UPTIME_T uptime;
@@ -59,13 +66,20 @@ static void am_init_video(void) {
 	draw_x = cfg.width > FB_W ? (cfg.width - FB_W) / 2 : 0;
 	draw_y = cfg.height > FB_H ? (cfg.height - FB_H) / 2 : 0;
 	memset(framebuffer, 0, sizeof(framebuffer));
+	memset(am_framebuffer, 0, sizeof(am_framebuffer));
 }
 
 static void am_flush_video(void) {
+	size_t i;
+	for (i = 0; i < FB_W * FB_H; ++i) {
+		uint32_t pixel = framebuffer[i];
+		am_framebuffer[i] = (pixel & 0x0000FF00) | ((pixel & 0x000000FF) << 16) | ((pixel & 0x00FF0000) >> 16);
+	}
+
 	AM_GPU_FBDRAW_T draw = {
 		.x = draw_x,
 		.y = draw_y,
-		.pixels = framebuffer,
+		.pixels = am_framebuffer,
 		.w = FB_W,
 		.h = FB_H,
 		.sync = true,
@@ -131,15 +145,15 @@ static void am_init_audio(void) {
 	AM_AUDIO_CTRL_T ctrl;
 	unsigned sample_rate;
 
+	am_deinit_audio();
 	ioe_read(AM_AUDIO_CONFIG, &cfg);
 	if (!cfg.present) {
-		audio_enabled = false;
 		return;
 	}
+	audio_bufsize = cfg.bufsize;
 
 	sample_rate = core->audioSampleRate(core);
-	if (!sample_rate) {
-		audio_enabled = false;
+	if (!sample_rate || audio_bufsize <= 0) {
 		return;
 	}
 
@@ -152,6 +166,9 @@ static void am_init_audio(void) {
 
 static void am_flush_audio(void) {
 	struct mAudioBuffer* buffer;
+	AM_AUDIO_STATUS_T status;
+	size_t frames;
+	size_t free_frames;
 
 	if (!audio_enabled) {
 		return;
@@ -162,20 +179,35 @@ static void am_flush_audio(void) {
 		return;
 	}
 
-	while (mAudioBufferAvailable(buffer) > 0) {
-		size_t frames = mAudioBufferAvailable(buffer);
-		AM_AUDIO_PLAY_T play;
-		if (frames > AUDIO_CHUNK_FRAMES) {
-			frames = AUDIO_CHUNK_FRAMES;
-		}
-		frames = mAudioBufferRead(buffer, audio_chunk, frames);
-		if (!frames) {
-			break;
-		}
-		play.buf.start = audio_chunk;
-		play.buf.end = (uint8_t*) audio_chunk + frames * AUDIO_CHANNELS * sizeof(audio_chunk[0]);
-		ioe_write(AM_AUDIO_PLAY, &play);
+	frames = mAudioBufferAvailable(buffer);
+	if (!frames) {
+		return;
 	}
+
+	ioe_read(AM_AUDIO_STATUS, &status);
+	if (status.count >= audio_bufsize) {
+		return;
+	}
+
+	free_frames = (audio_bufsize - status.count) / (AUDIO_CHANNELS * sizeof(audio_chunk[0]));
+	if (!free_frames) {
+		return;
+	}
+	if (frames > AUDIO_CHUNK_FRAMES) {
+		frames = AUDIO_CHUNK_FRAMES;
+	}
+	if (frames > free_frames) {
+		frames = free_frames;
+	}
+	frames = mAudioBufferRead(buffer, audio_chunk, frames);
+	if (!frames) {
+		return;
+	}
+
+	AM_AUDIO_PLAY_T play;
+	play.buf.start = audio_chunk;
+	play.buf.end = (uint8_t*) audio_chunk + frames * AUDIO_CHANNELS * sizeof(audio_chunk[0]);
+	ioe_write(AM_AUDIO_PLAY, &play);
 }
 
 static void am_poll_input(void) {
@@ -347,6 +379,7 @@ int main(const char* args) {
 	}
 
 	mLogSetDefaultLogger(NULL);
+	am_deinit_audio();
 	mStandardLoggerDeinit(&logger);
 	core->deinit(core);
 	if (fps_line_active) {
