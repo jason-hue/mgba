@@ -1,46 +1,40 @@
-# mGBA Minimal SDL
+# mGBA for Project-N AM/NEMU
 
-This is a minimal SDL2-based implementation of mGBA.
+This is a trimmed GBA-only mGBA porting project.
 
-## Building
+- Primary path: Project-N Abstract Machine / NEMU
+- Secondary path: minimal SDL host frontend
 
-1.  **Create a build directory:**
-    ```bash
-    mkdir build
-    cd build
-    ```
-
-2.  **Configure the project:**
-    ```bash
-    cmake ..
-    ```
-
-3.  **Build the SDL target:**
-    ```bash
-    make -j$(nproc)
-    ```
-
-## Running
-
-Launch the emulator by providing the path to a GBA ROM file:
+## AM build and run
 
 ```bash
-./mgba-sdl path/to/your/game.gba
+export AM_HOME=/home/knifefire/abstract-machine
+export NEMU_HOME=/home/knifefire/nemu
+
+make ARCH=native
+make ARCH=native run
+make ARCH=native run mainargs=dragonball
+
+make ARCH=$ISA-nemu
+make ARCH=$ISA-nemu run
+make ARCH=$ISA-nemu run mainargs=dragonball
 ```
 
-**Example:**
+AM ROMs are embedded from `roms/*.gba`.
+
+- `mainargs=<name>` selects an embedded ROM
+- no `mainargs` uses the first embedded ROM
+
+## SDL build and run
+
 ```bash
+mkdir build
+cd build
+cmake ..
+make -j$(nproc)
 ./mgba-sdl ../roms/dragonball.gba
 ```
+## Upstream
 
-## Key Mappings
-
-| Keyboard Key   | GBA Button |
-|:---------------|:-----------|
-| **X**          | A          |
-| **Z**          | B          |
-| **Enter**      | START      |
-| **Backspace**  | SELECT     |
-| **Arrow Keys** | D-Pad      |
-| **A**          | L          |
-| **S**          | R          |
+- https://github.com/mgba-emu/mgba
+- https://mgba.io/
