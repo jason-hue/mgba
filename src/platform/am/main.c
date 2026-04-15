@@ -13,20 +13,23 @@
 #define FB_W 240
 #define FB_H 160
 #define AUDIO_CHANNELS 2
-#define AUDIO_SAMPLES 1024
-#define AUDIO_CHUNK_FRAMES 1024
+#define AUDIO_SAMPLES 512
+#define AUDIO_CHUNK_FRAMES_MAX 1024
+#define AUDIO_QUEUE_TARGET_CHUNKS 2
 
 static struct mCore* core;
 static struct mStandardLogger logger;
 static mColor framebuffer[FB_W * FB_H];
 static uint32_t am_framebuffer[FB_W * FB_H];
-static int16_t audio_chunk[AUDIO_CHUNK_FRAMES * AUDIO_CHANNELS];
+static int16_t audio_chunk[AUDIO_CHUNK_FRAMES_MAX * AUDIO_CHANNELS];
 static bool pressed[256];
 static int draw_x;
 static int draw_y;
 static bool running;
 static bool audio_enabled;
 static int audio_bufsize;
+static unsigned audio_sample_rate;
+static size_t audio_chunk_frames;
 static uint64_t frame_time_us;
 static uint64_t next_frame_deadline_us;
 static uint64_t fps_window_start_us;
@@ -35,9 +38,55 @@ static bool fps_line_active;
 
 static void am_poll_input(void);
 
+static size_t am_compute_audio_chunk_frames(unsigned sample_rate) {
+	uint64_t frame_cycles;
+	uint64_t frequency;
+	uint64_t frames;
+
+	if (!sample_rate) {
+		return AUDIO_SAMPLES;
+	}
+
+	frame_cycles = core->frameCycles(core);
+	frequency = core->frequency(core);
+	if (!frame_cycles || !frequency) {
+		return AUDIO_SAMPLES;
+	}
+
+	frames = (uint64_t) sample_rate * frame_cycles;
+	frames = (frames + frequency - 1) / frequency;
+	if (!frames) {
+		frames = AUDIO_SAMPLES;
+	}
+	if (frames > AUDIO_CHUNK_FRAMES_MAX) {
+		frames = AUDIO_CHUNK_FRAMES_MAX;
+	}
+	return (size_t) frames;
+}
+
 static void am_deinit_audio(void) {
 	audio_enabled = false;
 	audio_bufsize = 0;
+	audio_sample_rate = 0;
+	audio_chunk_frames = AUDIO_SAMPLES;
+}
+
+static bool am_configure_audio(unsigned sample_rate) {
+	AM_AUDIO_CTRL_T ctrl;
+
+	if (!sample_rate || audio_bufsize <= 0) {
+		am_deinit_audio();
+		return false;
+	}
+
+	audio_chunk_frames = am_compute_audio_chunk_frames(sample_rate);
+	ctrl.freq = sample_rate;
+	ctrl.channels = AUDIO_CHANNELS;
+	ctrl.samples = AUDIO_SAMPLES;
+	ioe_write(AM_AUDIO_CTRL, &ctrl);
+	audio_sample_rate = sample_rate;
+	audio_enabled = true;
+	return true;
 }
 
 static uint64_t am_uptime_us(void) {
@@ -142,7 +191,6 @@ static void am_report_fps(void) {
 
 static void am_init_audio(void) {
 	AM_AUDIO_CONFIG_T cfg;
-	AM_AUDIO_CTRL_T ctrl;
 	unsigned sample_rate;
 
 	am_deinit_audio();
@@ -153,15 +201,7 @@ static void am_init_audio(void) {
 	audio_bufsize = cfg.bufsize;
 
 	sample_rate = core->audioSampleRate(core);
-	if (!sample_rate || audio_bufsize <= 0) {
-		return;
-	}
-
-	ctrl.freq = sample_rate;
-	ctrl.channels = AUDIO_CHANNELS;
-	ctrl.samples = AUDIO_SAMPLES;
-	ioe_write(AM_AUDIO_CTRL, &ctrl);
-	audio_enabled = true;
+	am_configure_audio(sample_rate);
 }
 
 static void am_flush_audio(void) {
@@ -169,9 +209,18 @@ static void am_flush_audio(void) {
 	AM_AUDIO_STATUS_T status;
 	size_t frames;
 	size_t free_frames;
+	unsigned sample_rate;
+	size_t queue_target_bytes;
 
 	if (!audio_enabled) {
 		return;
+	}
+
+	sample_rate = core->audioSampleRate(core);
+	if (sample_rate != audio_sample_rate) {
+		if (!am_configure_audio(sample_rate)) {
+			return;
+		}
 	}
 
 	buffer = core->getAudioBuffer(core);
@@ -185,16 +234,20 @@ static void am_flush_audio(void) {
 	}
 
 	ioe_read(AM_AUDIO_STATUS, &status);
-	if (status.count >= audio_bufsize) {
+	queue_target_bytes = audio_chunk_frames * AUDIO_CHANNELS * sizeof(audio_chunk[0]) * AUDIO_QUEUE_TARGET_CHUNKS;
+	if ((int) queue_target_bytes > audio_bufsize) {
+		queue_target_bytes = audio_bufsize;
+	}
+	if (status.count >= queue_target_bytes) {
 		return;
 	}
 
-	free_frames = (audio_bufsize - status.count) / (AUDIO_CHANNELS * sizeof(audio_chunk[0]));
+	free_frames = (queue_target_bytes - status.count) / (AUDIO_CHANNELS * sizeof(audio_chunk[0]));
 	if (!free_frames) {
 		return;
 	}
-	if (frames > AUDIO_CHUNK_FRAMES) {
-		frames = AUDIO_CHUNK_FRAMES;
+	if (frames > audio_chunk_frames) {
+		frames = audio_chunk_frames;
 	}
 	if (frames > free_frames) {
 		frames = free_frames;
